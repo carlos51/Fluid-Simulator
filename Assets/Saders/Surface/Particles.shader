@@ -1,4 +1,4 @@
-Shader "Custom/InstancedIndirectColor" {
+Shader "Custom/Particles" {
     SubShader {
         Tags { "RenderType" = "Transparent" 
                 "Queue" = "Transparent" }

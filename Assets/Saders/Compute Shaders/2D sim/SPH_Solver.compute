@@ -1,0 +1,69 @@
+#pragma kernel CSMain
+
+struct MeshProperties
+{
+    float4x4 mat;
+    float4 color;
+};
+
+RWStructuredBuffer<MeshProperties> _Properties;
+RWStructuredBuffer<float4> _Velocities;
+RWStructuredBuffer<float3> _Positions;
+
+// Bounding box (set from C#): particles will be clamped to [_BoxMin, _BoxMax]
+float3 _BoxMin;
+float3 _BoxMax;
+
+// Optional delta time (if not set, shader will use a small default step)
+float _DeltaTime;
+
+
+// We used to just be able to use (1, 1, 1) threads for whatever population (not sure the old limit), but a Unity update
+// imposed a thread limit of 65535.  Now, to populations above that, we need to be more granular with our threads.
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+
+    // simple fixed timestep if none provided
+    float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
+
+    // read velocity and position
+    float4 vel4 = _Velocities[i];
+    float3 v = vel4.xyz;
+    float3 pos;
+    pos.x = _Properties[i].mat[0][3];
+    pos.y = _Properties[i].mat[1][3];
+
+    // Force movement only in XY: zero out Z velocity and keep Z position unchanged
+    v.z = 0.0;
+
+    pos.x = _Properties[i].mat[0][3];
+    pos.y = _Properties[i].mat[1][3];
+    pos.z = _Properties[i].mat[2][3];
+    
+
+    // integrate
+    pos += v * dt;
+
+    // collide with box and reflect velocity on each axis
+    if (pos.x < _BoxMin.x) { pos.x = _BoxMin.x; v.x = -v.x; }
+    if (pos.x > _BoxMax.x) { pos.x = _BoxMax.x; v.x = -v.x; }
+
+    if (pos.y < _BoxMin.y) { pos.y = _BoxMin.y; v.y = -v.y; }
+    if (pos.y > _BoxMax.y) { pos.y = _BoxMax.y; v.y = -v.y; }
+
+    // write back position
+    _Properties[i].mat[0][3] = pos.x;
+    _Properties[i].mat[1][3] = pos.y;
+
+    // keep Z position unchanged so particles only move in XY
+    _Properties[i].mat[2][3] = pos.z;
+
+    // write back velocity (preserve .w)
+    // ensure Z velocity stays zero
+    _Velocities[i] = float4(v.x, v.y, 0.0, vel4.w);
+
+    // also update positions buffer (XYZ)
+    _Positions[i] = pos;
+}

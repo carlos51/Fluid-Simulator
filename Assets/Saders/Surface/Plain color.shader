@@ -1,9 +1,9 @@
-Shader "Unlit/Draw"
+Shader "Unlit/Plain color"
 {
     Properties
     {
-        _Color("Test Color",color) = (1,1,1,1)
-        _Radius("Radius", Range(0,1)) = 0.5
+        _MainTex ("Texture", 2D) = "white" {}
+        _Color ("Color", Color) = (1,1,1,1)
     }
     SubShader
     {
@@ -15,6 +15,8 @@ Shader "Unlit/Draw"
             CGPROGRAM
             #pragma vertex vert
             #pragma fragment frag
+            // make fog work
+            #pragma multi_compile_fog
 
             #include "UnityCG.cginc"
 
@@ -26,36 +28,31 @@ Shader "Unlit/Draw"
 
             struct v2f
             {
-                float4 vertex : SV_POSITION;
                 float2 uv : TEXCOORD0;
+                UNITY_FOG_COORDS(1)
+                float4 vertex : SV_POSITION;
             };
-            
+
+            sampler2D _MainTex;
+            float4 _MainTex_ST;
             fixed4 _Color;
-            float _Radius;
 
             v2f vert (appdata v)
             {
                 v2f o;
                 o.vertex = UnityObjectToClipPos(v.vertex);
-                o.uv = v.uv;
+                o.uv = TRANSFORM_TEX(v.uv, _MainTex);
+                UNITY_TRANSFER_FOG(o,o.vertex);
                 return o;
             }
 
             fixed4 frag (v2f i) : SV_Target
             {
-                // Calcular distancia desde el centro (0.5,0.5)
-                float2 center = float2(0.5, 0.5);
-                float2 uvs = i.uv;
-
-                uvs *= 3;
-                uvs -= frac(1 * float2(_Time.y,0));
-                float dist = distance(uvs, center);
-
-                // Si está dentro del radio, pintamos el color, sino transparente
-                if (dist <= _Radius)
-                    return _Color;
-                else
-                    return fixed4(1,1,1,0); // transparente
+                // output a flat color from the inspector, ignore texture
+                fixed4 col = _Color;
+                // apply fog
+                UNITY_APPLY_FOG(i.fogCoord, col);
+                return col;
             }
             ENDCG
         }

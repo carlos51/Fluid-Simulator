@@ -31,14 +31,19 @@ Shader "Custom/Particles" {
                 float4 color;
             };
 
-            StructuredBuffer<MeshProperties> _Properties;
+            StructuredBuffer<float4> _Positions;
+            StructuredBuffer<float4> _Colors;
+            float _Size;
 
             v2f vert(appdata_t i, uint instanceID: SV_InstanceID) {
                 v2f o;
 
-                float4 pos = mul(_Properties[instanceID].mat, i.vertex);
+                //float4 pos = mul(_Properties[instanceID].mat, i.vertex);
+                float4 pos = float4(i.vertex.xyz * _Size + _Positions[instanceID] , 1.0);
                 o.vertex = UnityObjectToClipPos(pos);
-                o.color = _Properties[instanceID].color;
+                 //o.vertex = mul(UNITY_MATRIX_VP, pos);  // world space directo
+                o.color = _Colors[instanceID];
+                
                 o.uv = i.uv;
 
 

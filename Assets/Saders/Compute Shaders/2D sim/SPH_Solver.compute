@@ -1,14 +1,20 @@
-#pragma kernel CSMain
+#pragma kernel Integrate
+#pragma kernel CalculateDensity
+#pragma kernel CalculateForce
+#include "Kernels.hlsl"
 
-struct MeshProperties
-{
-    float4x4 mat;
-    float4 color;
-};
 
-RWStructuredBuffer<MeshProperties> _Properties;
 RWStructuredBuffer<float4> _Velocities;
-RWStructuredBuffer<float3> _Positions;
+RWStructuredBuffer<float4> _Positions;
+RWStructuredBuffer<float> _Densities;
+RWStructuredBuffer<float4> _Forces;
+
+// SPH parameters (set from C#)
+int _NumParticles;
+float _H; // kernel radius
+float _K; // pressure stiffness
+float _TargetDensity;
+float _G; // gravity magnitude (applied downward in Y)
 
 // Bounding box (set from C#): particles will be clamped to [_BoxMin, _BoxMax]
 float3 _BoxMin;
@@ -17,53 +23,89 @@ float3 _BoxMax;
 // Optional delta time (if not set, shader will use a small default step)
 float _DeltaTime;
 
+static const int NumThreads = 64;
 
-// We used to just be able to use (1, 1, 1) threads for whatever population (not sure the old limit), but a Unity update
-// imposed a thread limit of 65535.  Now, to populations above that, we need to be more granular with our threads.
-[numthreads(64, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID)
+float CalculateDencity(float2 r, float h)
+{
+    //return W_Poly6_2D(r, h);
+}
+
+float CalculatePressure(float rho)
+{
+    return _K * (rho - _TargetDensity);
+}
+
+
+[numthreads(NumThreads, 1, 1)]
+void CalculateDensity(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
-
-    // simple fixed timestep if none provided
-    float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
-
-    // read velocity and position
-    float4 vel4 = _Velocities[i];
-    float3 v = vel4.xyz;
-    float3 pos;
-    pos.x = _Properties[i].mat[0][3];
-    pos.y = _Properties[i].mat[1][3];
-
-    // Force movement only in XY: zero out Z velocity and keep Z position unchanged
-    v.z = 0.0;
-
-    pos.x = _Properties[i].mat[0][3];
-    pos.y = _Properties[i].mat[1][3];
-    pos.z = _Properties[i].mat[2][3];
     
-
-    // integrate
-    pos += v * dt;
-
-    // collide with box and reflect velocity on each axis
-    if (pos.x < _BoxMin.x) { pos.x = _BoxMin.x; v.x = -v.x; }
-    if (pos.x > _BoxMax.x) { pos.x = _BoxMax.x; v.x = -v.x; }
-
-    if (pos.y < _BoxMin.y) { pos.y = _BoxMin.y; v.y = -v.y; }
-    if (pos.y > _BoxMax.y) { pos.y = _BoxMax.y; v.y = -v.y; }
-
-    // write back position
-    _Properties[i].mat[0][3] = pos.x;
-    _Properties[i].mat[1][3] = pos.y;
-
-    // keep Z position unchanged so particles only move in XY
-    _Properties[i].mat[2][3] = pos.z;
-
-    // write back velocity (preserve .w)
-    // ensure Z velocity stays zero
-    _Velocities[i] = float4(v.x, v.y, 0.0, vel4.w);
-
-    // also update positions buffer (XYZ)
-    _Positions[i] = pos;
+    float rho = 0.0;
+    float h = _H;
+    
+    
 }
+
+[numthreads(NumThreads, 1, 1)]
+void CalculateForce(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    
+    float3 force = float3(0.0, 0.0, 0.0);
+    /*
+    for (int j = 0; j < _NumParticles; j++)
+    {
+        if(j == i) continue;
+        float c = (CalculatePressure(_Densities[i]) - CalculatePressure(_Densities[j])) / (2.0 * _Densities[j]);
+        force += c * Grad_W_Spiky_2D(_Positions[i].xy - _Positions[j].xy, _H);
+    }
+    */
+    
+}
+
+[numthreads(NumThreads, 1, 1)]
+void Integrate(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= uint(_NumParticles))
+        return;
+
+    float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
+    float4 v = _Velocities[i];
+    float4 pos = _Positions[i];
+
+    // Gravedad directa, sin depender de densidades/fuerzas
+    //v.y -= _G * dt;
+    //v.z = 0.0;
+
+    pos += v * dt;
+    
+    //pos.z = 0.0; // mantener en plano 2D
+
+    // Colisiones con el box
+    if (pos.x < _BoxMin.x)
+    {
+        pos.x = _BoxMin.x;
+        v.x = abs(v.x);
+    }
+    if (pos.x > _BoxMax.x)
+    {
+        pos.x = _BoxMax.x;
+        v.x = -abs(v.x);
+    }
+    if (pos.y < _BoxMin.y)
+    {
+        pos.y = _BoxMin.y;
+        v.y = abs(v.y);
+    }
+    if (pos.y > _BoxMax.y)
+    {
+        pos.y = _BoxMax.y;
+        v.y = -abs(v.y);
+    }
+
+    _Velocities[i] = float4(v.xy, 0,0);
+    _Positions[i] = float4(pos.xy, 0,0);
+}
+

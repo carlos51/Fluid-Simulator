@@ -5,36 +5,32 @@ using UnityEngine;
 public class SPH_Manager : MonoBehaviour
 {
     public int population;
+    public float particleSize;
     public float range;
     public Vector3 BoxMin;
     public Vector3 BoxMax;
-
+    public float H; // kernel radius
+    public float k; // stiffness constant
+    public float targetDensity;
+    public float G; // gravity constant
     public Material material;
 
-    private ComputeBuffer meshPropertiesBuffer;
+
+
+    
     private ComputeBuffer argsBuffer;
     private ComputeBuffer velocitiesBuffer;
     private ComputeBuffer positionsBuffer;
     public ComputeShader computeShader;
+    private ComputeBuffer colorsBuffer;
+    private ComputeBuffer forcesBuffer;
+    private ComputeBuffer densitiesBuffer;
     
 
     public Mesh mesh;
     private Bounds bounds;
 
-    // Mesh Properties struct to be read from the GPU.
-    // Size() is a convenience funciton which returns the stride of the struct.
-    private struct MeshProperties
-    {
-        public Matrix4x4 mat;
-        public Vector4 color;
-
-        public static int Size()
-        {
-            return
-                sizeof(float) * 4 * 4 + // matrix;
-                sizeof(float) * 4;      // color;
-        }
-    }
+    // MeshProperties removed — no longer used for per-instance data from CPU.
 
     private void Setup()
     {
@@ -48,7 +44,7 @@ public class SPH_Manager : MonoBehaviour
 
     private void InitializeBuffers()
     {
-        int kernel = computeShader.FindKernel("CSMain");
+        int kernel = computeShader.FindKernel("Integrate");
         // Argument buffer used by DrawMeshInstancedIndirect.
         uint[] args = new uint[5] { 0, 0, 0, 0, 0 };
         // Arguments for drawing mesh.
@@ -60,42 +56,70 @@ public class SPH_Manager : MonoBehaviour
         argsBuffer = new ComputeBuffer(1, args.Length * sizeof(uint), ComputeBufferType.IndirectArguments);
         argsBuffer.SetData(args);
 
-        // Initialize buffer with the given population.
-        MeshProperties[] properties = new MeshProperties[population];
+        // Initialize buffers for the given population.
         Vector4[] velocities = new Vector4[population];
-        Vector3[] positions = new Vector3[population];
+        Vector4[] positions = new Vector4[population];
+        Vector4[] forces = new Vector4[population];
 
+        float[] densities = new float[population];
+        Vector4[] colors = new Vector4[population];
+
+
+        // Arrange particles in a centered 2D grid covering [-range, range]
+        int cols = Mathf.CeilToInt(Mathf.Sqrt(population));
+        int rows = Mathf.CeilToInt((float)population / cols);
+        float spacingX = (cols > 1) ? (2f * range) / (cols) : 0f;
+        float spacingY = (rows > 1) ? (2f * range) / (rows) : 0f;
 
         for (int i = 0; i < population; i++)
         {
-            MeshProperties props = new MeshProperties();
-            Vector3 position = new Vector3(Random.Range(-range, range), Random.Range(-range, range),0);
-            Quaternion rotation = Quaternion.identity;
-            Vector3 scale = Vector3.one * 0.1f;
-
-            props.mat = Matrix4x4.TRS(position, rotation, scale);
-            props.color = Color.Lerp(Color.red, Color.blue, Random.value);
-
-            properties[i] = props;
-            velocities[i] = new Vector4(Random.Range(-1f, 1f), Random.Range(-1f, 1f), 0f, 0);
-            positions[i] = position;
+            int col = i % cols;
+            int row = i / cols;
+            float x = -range + (col + 0.5f) * spacingX;
+            float y = -range + (row + 0.5f) * spacingY;
+            positions[i] = new Vector4(x, y, 0f, 0f);
+            // start stationary
+            velocities[i] = Vector4.zero;
+            colors[i] = Color.Lerp(Color.red, Color.blue, Random.value);
+            forces[i] = Vector4.zero;
         }
 
-        meshPropertiesBuffer = new ComputeBuffer(population, MeshProperties.Size());
-        meshPropertiesBuffer.SetData(properties);
-        material.SetBuffer("_Properties", meshPropertiesBuffer);
+
+        colorsBuffer = new ComputeBuffer(population, sizeof(float) * 4);
+        colorsBuffer.SetData(colors);
+        material.SetBuffer("_Colors", colorsBuffer);
+
+        forcesBuffer = new ComputeBuffer(population, sizeof(float) * 4);
+        forcesBuffer.SetData(forces);
+        computeShader.SetBuffer(kernel, "_Forces", forcesBuffer);
 
         velocitiesBuffer = new ComputeBuffer(population, sizeof(float) * 4);
         velocitiesBuffer.SetData(velocities);
-        computeShader.SetBuffer(kernel, "_Properties", meshPropertiesBuffer);
         computeShader.SetBuffer(kernel, "_Velocities", velocitiesBuffer);
-        // Positions buffer (XYZ per particle)
-        positionsBuffer = new ComputeBuffer(population, sizeof(float) * 3);
+
+        positionsBuffer = new ComputeBuffer(population, sizeof(float) * 4);
         positionsBuffer.SetData(positions);
         computeShader.SetBuffer(kernel, "_Positions", positionsBuffer);
+
+        densitiesBuffer = new ComputeBuffer(population, sizeof(float));
+        computeShader.SetBuffer(kernel, "_Densities", densitiesBuffer);
+
         material.SetBuffer("_Positions", positionsBuffer);
+        material.SetFloat("_ParticleSize", particleSize);
+        material.SetBuffer("_Colors", colorsBuffer);
+        material.SetFloat("_Size", particleSize);
+
         computeShader.SetVector("_BoxMin", BoxMin);
         computeShader.SetVector("_BoxMax", BoxMax);
+        computeShader.SetInt("_NumParticles", population);
+        computeShader.SetFloat("_H", H);
+        computeShader.SetFloat("_K", k);
+        computeShader.SetFloat("_TargetDensity", targetDensity);
+        computeShader.SetFloat("_G", G);
+
+
+
+
 
     }
 
@@ -107,20 +131,15 @@ public class SPH_Manager : MonoBehaviour
 
     private void Update()
     {
-        int kernel = computeShader.FindKernel("CSMain");
+        int integrate = computeShader.FindKernel("Integrate");
         //computeShader.SetFloat("_DeltaTime", Time.deltaTime);
-        computeShader.Dispatch(kernel, population / 64 + 1, 1, 1);
+        computeShader.Dispatch(integrate, population / 64 + 1, 1, 1);
         Graphics.DrawMeshInstancedIndirect(mesh, 0, material, bounds, argsBuffer);
     }
 
     private void OnDisable()
     {
         // Release gracefully.
-        if (meshPropertiesBuffer != null)
-        {
-            meshPropertiesBuffer.Release();
-        }
-        meshPropertiesBuffer = null;
 
         if (argsBuffer != null)
         {
@@ -137,6 +156,23 @@ public class SPH_Manager : MonoBehaviour
             positionsBuffer.Release();
         }
         positionsBuffer = null;
+        if (colorsBuffer != null)
+        {
+            colorsBuffer.Release();
+        }
+        colorsBuffer = null;
+        if (forcesBuffer != null)
+        {
+            forcesBuffer.Release();
+        }
+        forcesBuffer = null;
+        if (densitiesBuffer != null)
+        {
+            densitiesBuffer.Release();
+        }
+        densitiesBuffer = null;
 
     }
+
+
 }

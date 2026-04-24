@@ -1,4 +1,4 @@
-#pragma kernel Integrate
+﻿#pragma kernel Integrate
 #pragma kernel CalculateDensity
 #pragma kernel CalculateForce
 #include "Kernels.hlsl"
@@ -8,13 +8,15 @@ RWStructuredBuffer<float4> _Velocities;
 RWStructuredBuffer<float4> _Positions;
 RWStructuredBuffer<float> _Densities;
 RWStructuredBuffer<float4> _Forces;
+RWStructuredBuffer<float4> _Colors;
 
 // SPH parameters (set from C#)
-int _NumParticles;
+uint _NumParticles;
 float _H; // kernel radius
 float _K; // pressure stiffness
 float _TargetDensity;
 float _G; // gravity magnitude (applied downward in Y)
+float _Viscosity; // viscosity coefficient
 
 // Bounding box (set from C#): particles will be clamped to [_BoxMin, _BoxMax]
 float3 _BoxMin;
@@ -25,9 +27,9 @@ float _DeltaTime;
 
 static const int NumThreads = 64;
 
-float CalculateDencity(float2 r, float h)
+float Dencity2D(float r, float h)
 {
-    //return W_Poly6_2D(r, h);
+    return W_Poly6_2D(r, h);
 }
 
 float CalculatePressure(float rho)
@@ -35,32 +37,85 @@ float CalculatePressure(float rho)
     return _K * (rho - _TargetDensity);
 }
 
+float rand(uint seed)
+{
+    // Una función de hash simple pero efectiva
+    seed = (seed << 13) ^ seed;
+    return ((seed * (seed * seed * 15731 + 789221) + 1376312589) & 0x7fffffff) / 2147483647.0;
+}
+
+float4 GetGradientColor(float t)
+{
+    float3 red = float3(1, 0, 0);
+    float3 green = float3(0, 1, 0);
+    float3 blue = float3(0, 0, 1);
+    
+    float3 color;
+    
+    if (t < 0.5)
+    {
+        // Re-mapeamos t de [0, 0.5] a [0, 1] para el primer lerp
+        color = lerp(red, green, t * 2.0);
+    }
+    else
+    {
+        // Re-mapeamos t de [0.5, 1] a [0, 1] para el segundo lerp
+        color = lerp(green, blue, (t - 0.5) * 2.0);
+    }
+    
+    return float4(color, 1.0);
+}
+
 
 [numthreads(NumThreads, 1, 1)]
 void CalculateDensity(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
+    if (i >= uint(_NumParticles))
+        return;
     
     float rho = 0.0;
     float h = _H;
     
-    
+    for (uint j = 0; j < _NumParticles; j++)
+    {
+        if (i == j)
+            continue;
+        rho += Dencity2D(distance(_Positions[i].xy, _Positions[j].xy), h);
+    }
+    _Densities[i] = max(rho, 0.001);
 }
 
 [numthreads(NumThreads, 1, 1)]
 void CalculateForce(uint3 id : SV_DispatchThreadID)
 {
     uint i = id.x;
+    if (i >= _NumParticles)
+        return;
     
-    float3 force = float3(0.0, 0.0, 0.0);
-    /*
-    for (int j = 0; j < _NumParticles; j++)
+    float2 press_force = float2(0.0, 0.0);
+    float2 viscous_force = float2(0.0, 0.0);
+   
+    for (uint j = 0; j < _NumParticles; j++)
     {
         if(j == i) continue;
-        float c = (CalculatePressure(_Densities[i]) - CalculatePressure(_Densities[j])) / (2.0 * _Densities[j]);
-        force += c * Grad_W_Spiky_2D(_Positions[i].xy - _Positions[j].xy, _H);
+        float c = (CalculatePressure(_Densities[i]) + CalculatePressure(_Densities[j])) / (2.0 * _Densities[j]);
+        float2 offset = _Positions[j].xy - _Positions[i].xy;
+        float2 velocityDiff = _Velocities[i].xy - _Velocities[j].xy;
+        
+        //float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
+        //float dst = (length(offset) < 0.001) ? rand()
+        if (length(offset) < 0.001)
+        {
+            //offset = float2(rand(1221), rand(324));
+        }
+        
+        float2 viscousForce = velocityDiff * Laplacian_W_Viscosity_2D(length(offset), _H);
+        press_force += c * Grad_W_Poly6_2D(offset, _H);
+        //force -= viscousForce;
+        viscous_force += viscousForce;
     }
-    */
+    _Forces[i] = float4(press_force - _Viscosity * viscous_force, 0.0, 0.0);
     
 }
 
@@ -76,7 +131,8 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     float4 pos = _Positions[i];
 
     // Gravedad directa, sin depender de densidades/fuerzas
-    //v.y -= _G * dt;
+    v.y -= _G * dt;
+    v.xy += (_Forces[i].xy / _Densities[i]) * dt; // aplicar fuerzas SPH (presión)
     //v.z = 0.0;
 
     pos += v * dt;
@@ -107,5 +163,8 @@ void Integrate(uint3 id : SV_DispatchThreadID)
 
     _Velocities[i] = float4(v.xy, 0,0);
     _Positions[i] = float4(pos.xy, 0,0);
+    // Suponiendo que _TargetDensity es tu base
+    float t = saturate(_Densities[i] / (_TargetDensity ));
+    _Colors[i] = GetGradientColor(t);
 }
 

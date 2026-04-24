@@ -33,6 +33,7 @@ Shader "Custom/Particles" {
 
             StructuredBuffer<float4> _Positions;
             StructuredBuffer<float4> _Colors;
+            StructuredBuffer<float>  _Densities;
             float _Size;
 
             v2f vert(appdata_t i, uint instanceID: SV_InstanceID) {

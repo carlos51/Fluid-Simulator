@@ -1,22 +1,29 @@
 ﻿#pragma kernel Integrate
 #pragma kernel CalculateDensity
 #pragma kernel CalculateForce
+#pragma kernel UpdatePositions
 #include "Kernels.hlsl"
 
 
 RWStructuredBuffer<float4> _Velocities;
 RWStructuredBuffer<float4> _Positions;
+RWStructuredBuffer<float4> _PredictedPositions; // opcional, si quieres almacenar esto también
 RWStructuredBuffer<float> _Densities;
+RWStructuredBuffer<float> _NearDensities; // opcional, si quieres almacenar esto también
 RWStructuredBuffer<float4> _Forces;
 RWStructuredBuffer<float4> _Colors;
+RWStructuredBuffer<float> _DebugNearC;
 
 // SPH parameters (set from C#)
 uint _NumParticles;
 float _H; // kernel radius
 float _K; // pressure stiffness
+float _kNear; // near pressure stiffness
 float _TargetDensity;
 float _G; // gravity magnitude (applied downward in Y)
 float _Viscosity; // viscosity coefficient
+float _Damping; // damping factor for collisions (0-1, where 1 is no damping)
+
 
 // Bounding box (set from C#): particles will be clamped to [_BoxMin, _BoxMax]
 float3 _BoxMin;
@@ -32,9 +39,19 @@ float Dencity2D(float r, float h)
     return W_Poly6_2D(r, h);
 }
 
+float NearDencity2D(float r, float h)
+{
+    return W_Spiky_2D(r, h);
+}
+
 float CalculatePressure(float rho)
 {
     return _K * (rho - _TargetDensity);
+}
+
+float NearPressure(float nearRho)
+{
+    return _kNear * nearRho;
 }
 
 float rand(uint seed)
@@ -67,6 +84,7 @@ float4 GetGradientColor(float t)
 }
 
 
+
 [numthreads(NumThreads, 1, 1)]
 void CalculateDensity(uint3 id : SV_DispatchThreadID)
 {
@@ -75,15 +93,36 @@ void CalculateDensity(uint3 id : SV_DispatchThreadID)
         return;
     
     float rho = 0.0;
+    float nearRho = 0.0;
     float h = _H;
     
     for (uint j = 0; j < _NumParticles; j++)
     {
         if (i == j)
             continue;
-        rho += Dencity2D(distance(_Positions[i].xy, _Positions[j].xy), h);
+        rho += Dencity2D(distance(_PredictedPositions[i].xy, _PredictedPositions[j].xy), h);
+        nearRho += NearDencity2D(distance(_PredictedPositions[i].xy, _PredictedPositions[j].xy), h);
     }
     _Densities[i] = max(rho, 0.001);
+    _NearDensities[i] = nearRho;
+}
+
+
+[numthreads(NumThreads, 1, 1)]
+void UpdatePositions(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _NumParticles)
+        return;
+    float2 acc = float2(0.0, 0.0);
+    
+    acc.y -= _G * _DeltaTime;; // gravedad directa, sin depender de densidades/fuerzas
+    
+    _Velocities[i] += float4(acc, 0, 0);
+    
+    const float predictionFactor = 1 / 120.0;
+    
+    _PredictedPositions[i] = _Positions[i] + _Velocities[i] * predictionFactor;
 }
 
 [numthreads(NumThreads, 1, 1)]
@@ -94,13 +133,16 @@ void CalculateForce(uint3 id : SV_DispatchThreadID)
         return;
     
     float2 press_force = float2(0.0, 0.0);
+    float2 near_press_force = float2(0.0, 0.0);
     float2 viscous_force = float2(0.0, 0.0);
    
     for (uint j = 0; j < _NumParticles; j++)
     {
         if(j == i) continue;
         float c = (CalculatePressure(_Densities[i]) + CalculatePressure(_Densities[j])) / (2.0 * _Densities[j]);
-        float2 offset = _Positions[j].xy - _Positions[i].xy;
+        float nearC = (NearPressure(_NearDensities[i]) + NearPressure(_NearDensities[j])) / (2.0 * _Densities[j]);
+        _DebugNearC[i] = nearC; // opcional, para inspeccionar este valor en CPU
+        float2 offset = _PredictedPositions[j].xy - _PredictedPositions[i].xy;
         float2 velocityDiff = _Velocities[i].xy - _Velocities[j].xy;
         
         //float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
@@ -112,11 +154,15 @@ void CalculateForce(uint3 id : SV_DispatchThreadID)
         
         float2 viscousForce = velocityDiff * Laplacian_W_Viscosity_2D(length(offset), _H);
         press_force += c * Grad_W_Poly6_2D(offset, _H);
+        near_press_force += nearC * Grad_W_Spiky_2D(offset, _H);
+        
         //force -= viscousForce;
         viscous_force += viscousForce;
     }
-    _Forces[i] = float4(press_force - _Viscosity * viscous_force, 0.0, 0.0);
-    
+    _Forces[i] = float4(press_force + near_press_force - _Viscosity * viscous_force, 0.0, 0.0);
+    //_Forces[i] = float4(near_press_force , 0.0, 0.0);
+    // store last computed nearC for debugging/inspection on CPU
+    //_DebugNearC[i] = nearC;
 }
 
 [numthreads(NumThreads, 1, 1)]
@@ -126,43 +172,49 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     if (i >= uint(_NumParticles))
         return;
 
-    float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
+    //float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
+    float dt = _DeltaTime;
     float4 v = _Velocities[i];
     float4 pos = _Positions[i];
 
     // Gravedad directa, sin depender de densidades/fuerzas
-    v.y -= _G * dt;
-    v.xy += (_Forces[i].xy / _Densities[i]) * dt; // aplicar fuerzas SPH (presión)
-    //v.z = 0.0;
-
-    pos += v * dt;
     
-    //pos.z = 0.0; // mantener en plano 2D
-
+    float2 accel = _Forces[i].xy / _Densities[i];
+    //accel.y -= _G;
+    
+    v.xy += accel * dt;
+    
+    pos.xy += v.xy * dt;
+    //v.xy = v_half + accel * (dt * 0.5);
+    
     // Colisiones con el box
+    
+
     if (pos.x < _BoxMin.x)
     {
-        pos.x = _BoxMin.x;
-        v.x = abs(v.x);
+        pos.x = _BoxMin.x + 0.001;
+        v.x = abs(v.x) * _Damping;
     }
     if (pos.x > _BoxMax.x)
     {
-        pos.x = _BoxMax.x;
-        v.x = -abs(v.x);
+        pos.x = _BoxMax.x - 0.001;
+        v.x = -abs(v.x) * _Damping;
     }
     if (pos.y < _BoxMin.y)
     {
-        pos.y = _BoxMin.y;
-        v.y = abs(v.y);
+        pos.y = _BoxMin.y + 0.001;
+        v.y = abs(v.y) * _Damping;
     }
     if (pos.y > _BoxMax.y)
     {
-        pos.y = _BoxMax.y;
-        v.y = -abs(v.y);
+        pos.y = _BoxMax.y - 0.001;
+        v.y = -abs(v.y) * _Damping;
     }
 
+    
     _Velocities[i] = float4(v.xy, 0,0);
     _Positions[i] = float4(pos.xy, 0,0);
+    //_PredictedPositions[i] = float4(pos.xy, 0, 0);
     // Suponiendo que _TargetDensity es tu base
     float t = saturate(_Densities[i] / (_TargetDensity ));
     _Colors[i] = GetGradientColor(t);

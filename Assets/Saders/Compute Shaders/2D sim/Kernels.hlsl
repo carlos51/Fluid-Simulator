@@ -21,14 +21,29 @@ inline float W_Poly6_2D_vec(float2 rVec, float h)
     return W_Poly6_2D(length(rVec), h);
 }
 
+// W_spiky smoothing kernel (2D) - alternative smoothing kernel
+inline float W_Spiky_2D(float r, float h)
+{
+    if (r < 0.0 || r > h) return 0.0;
+    // constant chosen so that derivative matches Grad_W_Spiky_2D implementation
+    float A = 10.0 / (PI * pow(h, 5.0));
+    float diff = h - r;
+    return A * diff * diff * diff; // (h - r)^3
+}
+
+inline float W_Spiky_2D_vec(float2 rVec, float h)
+{
+    return W_Spiky_2D(length(rVec), h);
+}
+
 // grad W_spiky (presión) 2D
 inline float2 Grad_W_Spiky_2D(float2 rVec, float h)
 {
     float r = length(rVec);
     if (r <= 0.0 || r > h) return float2(0.0, 0.0);
-    float factor = -30.0 / (PI * pow(h, 5.0)); // normalización 2D (ajustable)
+    float factor = 30.0 / (PI * pow(h, 5.0)); // normalización 2D (ajustable)
     float coeff = factor * (h - r) * (h - r) / r; // (h-r)^2 / r
-    return coeff * rVec;
+    return -coeff * rVec;
 }
 
 inline float2 Grad_W_Poly6_2D(float2 rVec, float h) {

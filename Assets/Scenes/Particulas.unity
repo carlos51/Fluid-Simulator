@@ -208,7 +208,7 @@ Transform:
   m_GameObject: {fileID: 377138342}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 1, z: -10}
+  m_LocalPosition: {x: 10, y: 5, z: -10}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -385,7 +385,7 @@ Transform:
   m_GameObject: {fileID: 2100774178}
   serializedVersion: 2
   m_LocalRotation: {x: -0.7071068, y: 0, z: 0, w: 0.7071068}
-  m_LocalPosition: {x: 0, y: 0, z: 1}
+  m_LocalPosition: {x: 10.1, y: 8.3, z: 1}
   m_LocalScale: {x: 2.79, y: 2.79, z: 2.79}
   m_ConstrainProportionsScale: 1
   m_Children: []
@@ -435,10 +435,18 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9210e8580683de84595076f48ea3f465, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  population: 1000
-  range: 2
-  BoxMin: {x: -10, y: -5, z: -0.5}
-  BoxMax: {x: 10, y: 5, z: 0.5}
+  population: 3000
+  particleSize: 0.1
+  range: 5
+  BoxMin: {x: 0, y: 0, z: -0.5}
+  BoxMax: {x: 20, y: 10, z: 0.5}
+  H: 0.8
+  k: 50
+  kNear: 5
+  targetDensity: 55
+  viscosity: 0.03
+  G: 0.5
+  damping: 0.506
   material: {fileID: 2100000, guid: 6af42e893090f5d4784eb6b23d55fafc, type: 2}
   computeShader: {fileID: 7200000, guid: a1ac6be65a87b654c88b06aa4e5e98a0, type: 3}
   mesh: {fileID: 10210, guid: 0000000000000000e000000000000000, type: 0}

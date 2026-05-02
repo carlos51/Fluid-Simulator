@@ -2,8 +2,17 @@
 #pragma kernel CalculateDensity
 #pragma kernel CalculateForce
 #pragma kernel UpdatePositions
+#pragma kernel SortPairs
+#pragma kernel SetHashId
+#pragma kernel SetIndex
+#pragma kernel ClearIndex
 #include "Kernels.hlsl"
 
+struct hashId
+{
+    int keyHash;
+    int id;
+};
 
 RWStructuredBuffer<float4> _Velocities;
 RWStructuredBuffer<float4> _Positions;
@@ -12,7 +21,8 @@ RWStructuredBuffer<float> _Densities;
 RWStructuredBuffer<float> _NearDensities; // opcional, si quieres almacenar esto también
 RWStructuredBuffer<float4> _Forces;
 RWStructuredBuffer<float4> _Colors;
-RWStructuredBuffer<float> _DebugNearC;
+RWStructuredBuffer<hashId> _HashIds;
+RWStructuredBuffer<int> _HashIndex;
 
 // SPH parameters (set from C#)
 uint _NumParticles;
@@ -23,6 +33,9 @@ float _TargetDensity;
 float _G; // gravity magnitude (applied downward in Y)
 float _Viscosity; // viscosity coefficient
 float _Damping; // damping factor for collisions (0-1, where 1 is no damping)
+int groupWidth;
+int groupHeight;
+int stepIndex;
 
 
 // Bounding box (set from C#): particles will be clamped to [_BoxMin, _BoxMax]
@@ -37,6 +50,7 @@ static const int NumThreads = 64;
 float Dencity2D(float r, float h)
 {
     return W_Poly6_2D(r, h);
+    //return W_Spiky_2D(r, h);
 }
 
 float NearDencity2D(float r, float h)
@@ -83,6 +97,16 @@ float4 GetGradientColor(float t)
     return float4(color, 1.0);
 }
 
+int hash(int x, int y)
+{
+    int h = (x * 92837111) ^ (y * 689287499);
+    return h % _NumParticles;
+}
+
+void GetNeigboursIndex()
+{
+    
+}
 
 
 [numthreads(NumThreads, 1, 1)]
@@ -95,7 +119,34 @@ void CalculateDensity(uint3 id : SV_DispatchThreadID)
     float rho = 0.0;
     float nearRho = 0.0;
     float h = _H;
+    int x = int(_PredictedPositions[i].x / h);
+    int y = int(_PredictedPositions[i].y / h);
+    int hashP = hash(x, y);
+    int startIndex = _HashIndex[hashP];
     
+    for(int j = x-1; j <= x + 1; j++)
+    {
+        for(int k = y - 1; k <= y + 1; k++)
+        {
+            int neighborHash = hash(j, k);
+            int neighborIndex = _HashIndex[neighborHash];
+            if(neighborIndex == -1) continue; // No particles in this cell
+            
+            // Iteramos sobre los posibles vecinos en esta celda
+            for(uint n = neighborIndex; n < _NumParticles && _HashIds[n].keyHash == neighborHash; n++)
+            {
+                if (i == (uint) _HashIds[n].id)
+                    continue;
+                float2 offset = _PredictedPositions[i].xy - _PredictedPositions[_HashIds[n].id].xy;
+                float dist = length(offset);
+                rho += Dencity2D(dist, h);
+                nearRho += NearDencity2D(dist, h);
+            }
+        }
+    }
+    
+    
+    /*
     for (uint j = 0; j < _NumParticles; j++)
     {
         if (i == j)
@@ -103,9 +154,82 @@ void CalculateDensity(uint3 id : SV_DispatchThreadID)
         rho += Dencity2D(distance(_PredictedPositions[i].xy, _PredictedPositions[j].xy), h);
         nearRho += NearDencity2D(distance(_PredictedPositions[i].xy, _PredictedPositions[j].xy), h);
     }
+    */
+    
+    
     _Densities[i] = max(rho, 0.001);
     _NearDensities[i] = nearRho;
 }
+
+[numthreads(NumThreads, 1, 1)]
+void SortPairs(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= uint(_NumParticles))
+        return;
+    uint h = i & (groupWidth - 1);
+    uint indexLow = h + (groupHeight + 1) * (i / groupWidth);
+    uint indexHigh = indexLow + (stepIndex == 0 ? groupHeight - 2 * h : (groupHeight + 1)/2u);
+    
+    if (indexHigh >= _NumParticles)
+        return;
+    int valueLow = _HashIds[indexLow].keyHash;
+    int valueHigh = _HashIds[indexHigh].keyHash;
+    
+    if (valueLow > valueHigh)
+    {
+        int temp = _HashIds[indexLow].id;
+        _HashIds[indexLow].keyHash = valueHigh;
+        _HashIds[indexLow].id = _HashIds[indexHigh].id;
+        _HashIds[indexHigh].keyHash = valueLow;
+        _HashIds[indexHigh].id = temp;
+    }
+}
+
+[numthreads(NumThreads, 1, 1)]
+void SetHashId(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= uint(_NumParticles))
+        return;
+    
+    int x = int(_PredictedPositions[i].x / _H);
+    int y = int(_PredictedPositions[i].y / _H);
+    _HashIds[i].keyHash = hash(x, y);
+    _HashIds[i].id = i;
+}
+
+[numthreads(NumThreads, 1, 1)]
+void ClearIndex(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _NumParticles)
+        return;
+    
+    _HashIndex[i] = -1;
+}
+
+[numthreads(NumThreads, 1, 1)]
+void SetIndex(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= uint(_NumParticles))
+        return;
+    
+    int curr = _HashIds[i].keyHash;
+    int last = -1;
+    if (i != 0)
+    {
+        last = _HashIds[i - 1].keyHash;
+    }
+    
+    if (last != curr)
+    {
+        _HashIndex[curr] = i;
+    }
+
+}
+
 
 
 [numthreads(NumThreads, 1, 1)]
@@ -131,38 +255,66 @@ void CalculateForce(uint3 id : SV_DispatchThreadID)
     uint i = id.x;
     if (i >= _NumParticles)
         return;
-    
+    float h = _H;
     float2 press_force = float2(0.0, 0.0);
     float2 near_press_force = float2(0.0, 0.0);
     float2 viscous_force = float2(0.0, 0.0);
+    int x = int(_PredictedPositions[i].x / h);
+    int y = int(_PredictedPositions[i].y / h);
+    int hashP = hash(x, y);
+    int startIndex = _HashIndex[hashP];
    
+    for (int j = x - 1; j <= x + 1; j++)
+    {
+        for (int k = y - 1; k <= y + 1; k++)
+        {
+            int cellHash = hash(j, k);
+            int neighborIndex = _HashIndex[cellHash];
+            if (neighborIndex == -1)
+                continue; // No particles in this cell
+            
+            // Iteramos sobre los posibles vecinos en esta celda
+            for (uint n = neighborIndex; n < _NumParticles && _HashIds[n].keyHash == cellHash; n++)
+            {
+                uint neighborID = (uint) _HashIds[n].id;
+                
+                if (i == neighborID)
+                    continue;
+                
+                float c = (CalculatePressure(_Densities[i]) + CalculatePressure(_Densities[neighborID])) / (2.0 * _Densities[neighborID]);
+                float nearC = (NearPressure(_NearDensities[i]) + NearPressure(_NearDensities[neighborID])) / (2.0 * _Densities[neighborID]);
+                float2 offset = _PredictedPositions[neighborID].xy - _PredictedPositions[i].xy;
+                float2 velocityDiff = _Velocities[i].xy - _Velocities[neighborID].xy;
+        
+    
+        
+                float2 viscousForce = velocityDiff * Laplacian_W_Viscosity_2D(length(offset), h);
+                press_force += c * Grad_W_Poly6_2D(offset, h);
+                near_press_force += nearC * Grad_W_Spiky_2D(offset, h);
+        
+                viscous_force += viscousForce;
+            }
+        }
+    }
+    /*
     for (uint j = 0; j < _NumParticles; j++)
     {
         if(j == i) continue;
         float c = (CalculatePressure(_Densities[i]) + CalculatePressure(_Densities[j])) / (2.0 * _Densities[j]);
         float nearC = (NearPressure(_NearDensities[i]) + NearPressure(_NearDensities[j])) / (2.0 * _Densities[j]);
-        _DebugNearC[i] = nearC; // opcional, para inspeccionar este valor en CPU
         float2 offset = _PredictedPositions[j].xy - _PredictedPositions[i].xy;
         float2 velocityDiff = _Velocities[i].xy - _Velocities[j].xy;
         
-        //float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
-        //float dst = (length(offset) < 0.001) ? rand()
-        if (length(offset) < 0.001)
-        {
-            //offset = float2(rand(1221), rand(324));
-        }
+    
         
         float2 viscousForce = velocityDiff * Laplacian_W_Viscosity_2D(length(offset), _H);
         press_force += c * Grad_W_Poly6_2D(offset, _H);
         near_press_force += nearC * Grad_W_Spiky_2D(offset, _H);
         
-        //force -= viscousForce;
         viscous_force += viscousForce;
-    }
+    }*/
+    
     _Forces[i] = float4(press_force + near_press_force - _Viscosity * viscous_force, 0.0, 0.0);
-    //_Forces[i] = float4(near_press_force , 0.0, 0.0);
-    // store last computed nearC for debugging/inspection on CPU
-    //_DebugNearC[i] = nearC;
 }
 
 [numthreads(NumThreads, 1, 1)]
@@ -172,7 +324,6 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     if (i >= uint(_NumParticles))
         return;
 
-    //float dt = (_DeltaTime > 0.0) ? _DeltaTime : 0.01;
     float dt = _DeltaTime;
     float4 v = _Velocities[i];
     float4 pos = _Positions[i];
@@ -180,12 +331,10 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     // Gravedad directa, sin depender de densidades/fuerzas
     
     float2 accel = _Forces[i].xy / _Densities[i];
-    //accel.y -= _G;
     
     v.xy += accel * dt;
     
     pos.xy += v.xy * dt;
-    //v.xy = v_half + accel * (dt * 0.5);
     
     // Colisiones con el box
     
@@ -214,7 +363,6 @@ void Integrate(uint3 id : SV_DispatchThreadID)
     
     _Velocities[i] = float4(v.xy, 0,0);
     _Positions[i] = float4(pos.xy, 0,0);
-    //_PredictedPositions[i] = float4(pos.xy, 0, 0);
     // Suponiendo que _TargetDensity es tu base
     float t = saturate(_Densities[i] / (_TargetDensity ));
     _Colors[i] = GetGradientColor(t);

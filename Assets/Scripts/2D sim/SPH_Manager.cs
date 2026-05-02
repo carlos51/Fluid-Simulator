@@ -2,12 +2,14 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using static UnityEngine.Mathf;
 
 public class SPH_Manager : MonoBehaviour
 {
     public int population;
     public float particleSize;
     public float range;
+    public int subSteps; // number of substeps to perform per frame for stability
     public Vector3 BoxMin;
     public Vector3 BoxMax;
     public float H; // kernel radius
@@ -22,17 +24,9 @@ public class SPH_Manager : MonoBehaviour
 
 
 
-    
+    private ComputeHelper helper;
     private ComputeBuffer argsBuffer;
-    private ComputeBuffer velocitiesBuffer;
-    private ComputeBuffer positionsBuffer;
-    private ComputeBuffer predictedPositionsBuffer;
     public ComputeShader computeShader;
-    private ComputeBuffer colorsBuffer;
-    private ComputeBuffer forcesBuffer;
-    private ComputeBuffer densitiesBuffer;
-    private ComputeBuffer nearDensitiesBuffer;
-    private ComputeBuffer debugNearCBuffer;
 
     public Mesh mesh;
     private Bounds bounds;
@@ -40,19 +34,30 @@ public class SPH_Manager : MonoBehaviour
     private int forceKernel;
     private int densityKernel;
     private int updateKernel;
+    private int sortPairsKernel;
+    private int setHashIdKernel;
+    private int setIndexKernel;
+    private int clearedIndexKernel;
     private const float deltaTime = 0.016f;
 
-    private float[] nearCDebug = new float[3000];
 
-    private float[] densitiesOnCPU = new float[3000];
-    private Vector4[] forcesOnCPU = new Vector4[3000];
+
+
+    private struct hashId
+        {
+            public int keyHash;
+            public int id;
+        }
+
+    private hashId[] someArray = new hashId[8];
+    private int[] ints = new int[8];
+    private Vector4[] forces = new Vector4[2048];
 
     // MeshProperties removed — no longer used for per-instance data from CPU.
 
     private void Setup()
     {
         
-
         // Boundary surrounding the meshes we will be drawing.  Used for occlusion.
         bounds = new Bounds(transform.position, Vector3.one * (range + 1));
         
@@ -61,10 +66,20 @@ public class SPH_Manager : MonoBehaviour
 
     private void InitializeBuffers()
     {
+        string [] names = {"Integrate", "CalculateForce", "CalculateDensity", "UpdatePositions", "SortPairs", "SetHashId", "SetIndex",
+        "ClearIndex"};
+
+        helper = new ComputeHelper(computeShader);
+        helper.SetKernels(names);
+
         integrateKernel = computeShader.FindKernel("Integrate");
         densityKernel = computeShader.FindKernel("CalculateDensity");
         forceKernel = computeShader.FindKernel("CalculateForce");
         updateKernel = computeShader.FindKernel("UpdatePositions");
+        sortPairsKernel = computeShader.FindKernel("SortPairs");
+        setHashIdKernel = computeShader.FindKernel("SetHashId");
+        setIndexKernel = computeShader.FindKernel("SetIndex");
+        clearedIndexKernel = computeShader.FindKernel("ClearIndex");
 
         // Argument buffer used by DrawMeshInstancedIndirect.
         uint[] args = new uint[5] { 0, 0, 0, 0, 0 };
@@ -85,81 +100,68 @@ public class SPH_Manager : MonoBehaviour
         float[] densities = new float[population];
         float[] nearDensities = new float[population];
         Vector4[] colors = new Vector4[population];
+        //int [] hashIds = new int[population * 2];
+        int [] hashIndex = new int[population];
 
+        for (int i = 0; i < population; i++)
+        {
+            hashIndex[i] = -1;
+        }
 
-        // Arrange particles in a centered 2D grid covering [-range, range]
-        // fill particle arrays (grid by default)
         //SpawnGrid(positions, velocities, colors, forces);
         SpawnRandom(positions, velocities, colors, forces);
 
+        helper.CreateAndSetBuffer("_Colors", population, sizeof(float) * 4);
+        helper.SetBufferData("_Colors", colors);
 
-        colorsBuffer = new ComputeBuffer(population, sizeof(float) * 4);
-        colorsBuffer.SetData(colors);
-        material.SetBuffer("_Colors", colorsBuffer);
-        computeShader.SetBuffer(integrateKernel, "_Colors",colorsBuffer);
+        helper.CreateAndSetBuffer("_Forces", population, sizeof(float) * 4);
+        helper.SetBufferData("_Forces", forces);
+     
+        helper.CreateAndSetBuffer("_Velocities", population, sizeof(float) * 4);
+        helper.SetBufferData("_Velocities", velocities);
 
-        forcesBuffer = new ComputeBuffer(population, sizeof(float) * 4);
-        forcesBuffer.SetData(forces);
-        computeShader.SetBuffer(integrateKernel, "_Forces", forcesBuffer);
-        computeShader.SetBuffer(forceKernel, "_Forces", forcesBuffer);
-        computeShader.SetBuffer(densityKernel, "_Forces", forcesBuffer);
-        computeShader.SetBuffer(updateKernel, "_Forces", forcesBuffer);
+        helper.CreateAndSetBuffer("_Positions", population, sizeof(float) * 4);
+        helper.SetBufferData("_Positions", positions);
 
-        velocitiesBuffer = new ComputeBuffer(population, sizeof(float) * 4);
-        velocitiesBuffer.SetData(velocities);
-        computeShader.SetBuffer(integrateKernel, "_Velocities", velocitiesBuffer);
-        computeShader.SetBuffer(forceKernel, "_Velocities", velocitiesBuffer);
-        computeShader.SetBuffer(densityKernel, "_Velocities", velocitiesBuffer);
-        computeShader.SetBuffer(updateKernel,"_Velocities", velocitiesBuffer);
+        helper.CreateAndSetBuffer("_Densities", population, sizeof(float));
+        helper.SetBufferData("_Densities", densities);
 
-        positionsBuffer = new ComputeBuffer(population, sizeof(float) * 4);
-        positionsBuffer.SetData(positions);
-        computeShader.SetBuffer(integrateKernel, "_Positions", positionsBuffer);
-        computeShader.SetBuffer(forceKernel, "_Positions", positionsBuffer);
-        computeShader.SetBuffer(densityKernel, "_Positions", positionsBuffer);
-        computeShader.SetBuffer(updateKernel,"_Positions",positionsBuffer);
+        helper.CreateAndSetBuffer("_NearDensities", population, sizeof(float));
+        helper.SetBufferData("_NearDensities", nearDensities);
 
 
-        densitiesBuffer = new ComputeBuffer(population, sizeof(float));
-        computeShader.SetBuffer(integrateKernel, "_Densities", densitiesBuffer);
-        computeShader.SetBuffer(forceKernel, "_Densities", densitiesBuffer);
-        computeShader.SetBuffer(densityKernel, "_Densities", densitiesBuffer);
-        computeShader.SetBuffer(updateKernel, "_Densities", densitiesBuffer);
 
-        nearDensitiesBuffer = new ComputeBuffer(population, sizeof(float));
-        computeShader.SetBuffer(integrateKernel, "_NearDensities", nearDensitiesBuffer);
-        computeShader.SetBuffer(forceKernel, "_NearDensities", nearDensitiesBuffer);
-        computeShader.SetBuffer(densityKernel, "_NearDensities", nearDensitiesBuffer);
-        computeShader.SetBuffer(updateKernel, "_NearDensities", nearDensitiesBuffer);
+        helper.CreateAndSetBuffer("_PredictedPositions", population, sizeof(float)*4);
 
-        debugNearCBuffer = new ComputeBuffer(population, sizeof(float));
-        computeShader.SetBuffer(integrateKernel, "_DebugNearC", debugNearCBuffer);
-        computeShader.SetBuffer(forceKernel, "_DebugNearC", debugNearCBuffer);
-        computeShader.SetBuffer(densityKernel, "_DebugNearC", debugNearCBuffer);
+        helper.CreateAndSetBuffer("_HashIds", population, sizeof(int) * 2);
 
-        predictedPositionsBuffer = new ComputeBuffer(population, sizeof(float) * 4);
-        computeShader.SetBuffer(integrateKernel, "_PredictedPositions", predictedPositionsBuffer);
-        computeShader.SetBuffer(forceKernel, "_PredictedPositions", predictedPositionsBuffer);
-        computeShader.SetBuffer(densityKernel, "_PredictedPositions", predictedPositionsBuffer);
-        computeShader.SetBuffer(updateKernel, "_PredictedPositions", predictedPositionsBuffer);
+        helper.CreateAndSetBuffer("_HashIndex", population, sizeof(int));
+        helper.SetBufferData("_HashIndex", hashIndex);
 
-        material.SetBuffer("_Positions", positionsBuffer);
+        ComputeBuffer pos = helper.GetBuffer("_Positions");
+        ComputeBuffer den = helper.GetBuffer("_Densities");
+        ComputeBuffer col = helper.GetBuffer("_Colors");
+
+        material.SetBuffer("_Positions", pos);
         material.SetFloat("_ParticleSize", particleSize);
-        material.SetBuffer("_Colors", colorsBuffer);
+        material.SetBuffer("_Colors", col);
         material.SetFloat("_Size", particleSize);
-        material.SetBuffer("_Densities",densitiesBuffer);
+        material.SetBuffer("_Densities", pos);
 
-        computeShader.SetVector("_BoxMin", BoxMin);
-        computeShader.SetVector("_BoxMax", BoxMax);
-        computeShader.SetInt("_NumParticles", population);
-        computeShader.SetFloat("_H", H);
-        computeShader.SetFloat("_K", k);
-        computeShader.SetFloat("_kNear", kNear);
-        computeShader.SetFloat("_TargetDensity", targetDensity);
-        computeShader.SetFloat("_G", G);
-        computeShader.SetFloat("_Viscosity", viscosity);
-        computeShader.SetFloat("_Damping", damping);
-        computeShader.SetFloat("_DeltaTime", deltaTime);
+
+
+        helper.SetVector("_BoxMin", BoxMin);
+        helper.SetVector("_BoxMax", BoxMax);
+        helper.SetInt("_NumParticles", population);
+        helper.SetFloat("_H", H);
+        helper.SetFloat("_K", k);
+        helper.SetFloat("_kNear", kNear);
+        helper.SetFloat("_TargetDensity", targetDensity);
+        helper.SetFloat("_G", G);
+        helper.SetFloat("_Viscosity", viscosity);
+        helper.SetFloat("_Damping", damping);
+        helper.SetFloat("_DeltaTime", deltaTime);
+
 
 
     }
@@ -183,8 +185,8 @@ public class SPH_Manager : MonoBehaviour
         {
             int col = i % cols;
             int row = i / cols;
-            float x = -range + (col + 0.5f) * spacingX;
-            float y = -range + (row + 0.5f) * spacingY;
+            float x = (col + 0.5f) * spacingX;
+            float y = (row + 0.5f) * spacingY;
             positions[i] = new Vector4(x, y, 0f, 0f);
             velocities[i] = Vector4.zero;
             colors[i] = Color.Lerp(Color.red, Color.blue, UnityEngine.Random.value);
@@ -197,12 +199,32 @@ public class SPH_Manager : MonoBehaviour
     {
         for (int i = 0; i < population; i++)
         {
-            float x = UnityEngine.Random.Range(-range, range);
-            float y = UnityEngine.Random.Range(-range, range);
+            float x = UnityEngine.Random.Range(0, range);
+            float y = UnityEngine.Random.Range(0, range);
             positions[i] = new Vector4(x, y, 0f, 0f);
             velocities[i] = Vector4.zero;
             colors[i] = Color.Lerp(Color.red, Color.blue, UnityEngine.Random.value);
             forces[i] = Vector4.zero;
+        }
+    }
+
+    public void Sort(int numElements)
+    {
+        int numPairs = NextPowerOfTwo(numElements);
+        int numStages = (int)Log(numPairs * 2, 2);
+
+        for(int stageIndex = 0; stageIndex < numStages; stageIndex++)
+        {
+            for (int stepIndex = 0; stepIndex < stageIndex + 1; stepIndex++)
+            {
+                int groupWidth = 1 << (stageIndex - stepIndex);
+                int groupHeight = 2 * groupWidth - 1;
+                helper.SetInt("groupWidth", groupWidth);
+                helper.SetInt("groupHeight", groupHeight);
+                helper.SetInt("stepIndex", stepIndex);
+
+                helper.Dispatch(sortPairsKernel, numPairs,1,1);
+            }
         }
     }
 
@@ -211,32 +233,45 @@ public class SPH_Manager : MonoBehaviour
         // update shader/material parameters from inspector
         UpdateShaderParams();
 
-        computeShader.Dispatch(updateKernel, population / 64 + 1, 1, 1);
-
-        computeShader.Dispatch(densityKernel, population / 64 + 1, 1, 1);
-
-        computeShader.Dispatch(forceKernel, population / 64 + 1, 1, 1);
-
-        nearDensitiesBuffer.GetData(nearCDebug);
-
-        computeShader.Dispatch(integrateKernel, population / 64 + 1, 1, 1);
+        for (int i = 0; i < subSteps; i++)
+        {
+            Step();
+        }
+        
 
         Graphics.DrawMeshInstancedIndirect(mesh, 0, material, bounds, argsBuffer);
+    }
+
+    private void Step()
+    {
+        helper.Dispatch(updateKernel, population / 64 + 1, 1, 1);
+        helper.Dispatch(setHashIdKernel, population / 64 + 1, 1, 1);
+
+        Sort(population);
+
+        helper.Dispatch(clearedIndexKernel, population / 64 + 1, 1, 1);
+
+        helper.Dispatch(setIndexKernel, population / 64 + 1, 1, 1);
+
+        helper.Dispatch(densityKernel, population / 64 + 1, 1, 1);
+
+        helper.Dispatch(forceKernel, population / 64 + 1, 1, 1);
+        helper.Dispatch(0, population / 64 + 1, 1, 1);
     }
 
     // Set compute shader and material parameters so inspector changes take effect at runtime
     private void UpdateShaderParams()
     {
-        computeShader.SetVector("_BoxMin", BoxMin);
-        computeShader.SetVector("_BoxMax", BoxMax);
-        computeShader.SetInt("_NumParticles", population);
-        computeShader.SetFloat("_H", H);
-        computeShader.SetFloat("_K", k);
-        computeShader.SetFloat("_kNear", kNear);
-        computeShader.SetFloat("_TargetDensity", targetDensity);
-        computeShader.SetFloat("_G", G);
-        computeShader.SetFloat("_Viscosity", viscosity);
-        computeShader.SetFloat("_Damping", damping);
+        helper.SetVector("_BoxMin", BoxMin);
+        helper.SetVector("_BoxMax", BoxMax);
+        helper.SetInt("_NumParticles", population);
+        helper.SetFloat("_H", H);
+        helper.SetFloat("_K", k);
+        helper.SetFloat("_kNear", kNear);
+        helper.SetFloat("_TargetDensity", targetDensity);
+        helper.SetFloat("_G", G);
+        helper.SetFloat("_Viscosity", viscosity);
+        helper.SetFloat("_Damping", damping);
 
         // update material properties
         if (material != null)
@@ -250,42 +285,12 @@ public class SPH_Manager : MonoBehaviour
     {
         // Release gracefully.
 
-        if (argsBuffer != null)
-        {
-            argsBuffer.Release();
-        }
-        argsBuffer = null;
-        if (velocitiesBuffer != null)
-        {
-            velocitiesBuffer.Release();
-        }
-        velocitiesBuffer = null;
-        if (positionsBuffer != null)
-        {
-            positionsBuffer.Release();
-        }
-        positionsBuffer = null;
-        if (colorsBuffer != null)
-        {
-            colorsBuffer.Release();
-        }
-        colorsBuffer = null;
-        if (forcesBuffer != null)
-        {
-            forcesBuffer.Release();
-        }
-        forcesBuffer = null;
-        if (densitiesBuffer != null)
-        {
-            densitiesBuffer.Release();
-        }
-        densitiesBuffer = null;
-        if (nearDensitiesBuffer != null)
-        {
-            nearDensitiesBuffer.Release();
-        }
+        helper.ReleaseBuffers();
+        argsBuffer.Release();
 
     }
+
+
 
 
 }

@@ -54,6 +54,22 @@ public class SPH_Manager : MonoBehaviour
     private Vector4[] forces = new Vector4[2048];
 
     // MeshProperties removed — no longer used for per-instance data from CPU.
+    public bool Running = false;
+
+    
+
+    public void StepOnce()
+    {
+        UpdateShaderParams();
+        Step();
+    }
+
+    public void Restart()
+    {
+        if (argsBuffer != null) argsBuffer.Release();
+        helper.ReleaseBuffers();
+        Setup();
+    }
 
     private void Setup()
     {
@@ -199,11 +215,11 @@ public class SPH_Manager : MonoBehaviour
     {
         for (int i = 0; i < population; i++)
         {
-            float x = UnityEngine.Random.Range(0, range);
-            float y = UnityEngine.Random.Range(0, range);
+            float x = UnityEngine.Random.Range(BoxMin.x, BoxMax.x);
+            float y = UnityEngine.Random.Range(BoxMin.y, BoxMax.y);
             positions[i] = new Vector4(x, y, 0f, 0f);
             velocities[i] = Vector4.zero;
-            colors[i] = Color.Lerp(Color.red, Color.blue, UnityEngine.Random.value);
+            colors[i] = Color.blue;//Color.Lerp(Color.red, Color.blue, UnityEngine.Random.value);
             forces[i] = Vector4.zero;
         }
     }
@@ -228,17 +244,13 @@ public class SPH_Manager : MonoBehaviour
         }
     }
 
+
+
     private void Update()
     {
-        // update shader/material parameters from inspector
         UpdateShaderParams();
-
-        for (int i = 0; i < subSteps; i++)
-        {
-            Step();
-        }
-        
-
+        if (Running)
+            for (int i = 0; i < subSteps; i++) Step();
         Graphics.DrawMeshInstancedIndirect(mesh, 0, material, bounds, argsBuffer);
     }
 
@@ -258,6 +270,7 @@ public class SPH_Manager : MonoBehaviour
         helper.Dispatch(forceKernel, population / 64 + 1, 1, 1);
         helper.Dispatch(0, population / 64 + 1, 1, 1);
     }
+
 
     // Set compute shader and material parameters so inspector changes take effect at runtime
     private void UpdateShaderParams()

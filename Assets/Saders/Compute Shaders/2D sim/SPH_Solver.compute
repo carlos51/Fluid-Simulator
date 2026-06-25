@@ -49,13 +49,13 @@ static const int NumThreads = 64;
 
 float Dencity2D(float r, float h)
 {
-    return W_Poly6_2D(r, h);
-    //return W_Spiky_2D(r, h);
+    //return W_Poly6_2D(r, h);
+    return SpikyKernelPow2(r, h);
 }
 
 float NearDencity2D(float r, float h)
 {
-    return W_Spiky_2D(r, h);
+    return SpikyKernelPow3(r, h);
 }
 
 float CalculatePressure(float rho)
@@ -66,6 +66,22 @@ float CalculatePressure(float rho)
 float NearPressure(float nearRho)
 {
     return _kNear * nearRho;
+}
+
+float ViscosityKernel(float dst, float radius)
+{
+    //return W_Poly6_2D(dst, radius);
+    return Laplacian_W_Viscosity_2D(dst, radius);
+}
+
+float DensityDerivative(float r, float h)
+{
+    return DerivativeSpikyPow2(r, h);
+}
+
+float NearDensityDerivative(float r, float h)
+{
+    return DerivativeSpikyPow3(r, h);
 }
 
 float rand(uint seed)
@@ -119,6 +135,7 @@ void CalculateDensity(uint3 id : SV_DispatchThreadID)
     float rho = 0.0;
     float nearRho = 0.0;
     float h = _H;
+    float sqrRadius = h * h;
     int x = int(_PredictedPositions[i].x / h);
     int y = int(_PredictedPositions[i].y / h);
     int hashP = hash(x, y);
@@ -157,7 +174,7 @@ void CalculateDensity(uint3 id : SV_DispatchThreadID)
     */
     
     
-    _Densities[i] = max(rho, 0.001);
+    _Densities[i] = rho; //max(rho, 0.001);
     _NearDensities[i] = nearRho;
 }
 
@@ -285,12 +302,12 @@ void CalculateForce(uint3 id : SV_DispatchThreadID)
                 float nearC = (NearPressure(_NearDensities[i]) + NearPressure(_NearDensities[neighborID])) / (2.0 * _Densities[neighborID]);
                 float2 offset = _PredictedPositions[neighborID].xy - _PredictedPositions[i].xy;
                 float2 velocityDiff = _Velocities[i].xy - _Velocities[neighborID].xy;
+                float dst = length(offset);
+                float2 dirToNeighbour = dst > 0 ? offset / dst : float2(0, 1);
         
-    
-        
-                float2 viscousForce = velocityDiff * Laplacian_W_Viscosity_2D(length(offset), h);
-                press_force += c * Grad_W_Poly6_2D(offset, h);
-                near_press_force += nearC * Grad_W_Spiky_2D(offset, h);
+                float2 viscousForce = velocityDiff * ViscosityKernel(dst, h);
+                press_force += dirToNeighbour * c * DensityDerivative(dst, h);
+                near_press_force += dirToNeighbour * nearC * NearDensityDerivative(dst, h);
         
                 viscous_force += viscousForce;
             }

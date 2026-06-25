@@ -16,13 +16,18 @@ inline float W_Poly6_2D(float r, float h)
     return factor * term * term * term; // (h^2 - r^2)^3
 }
 
-inline float W_Poly6_2D_vec(float2 rVec, float h)
+inline float SpikyKernelPow2(float r, float h)
 {
-    return W_Poly6_2D(length(rVec), h);
+    float SpikyPow2ScalingFactor = 6 / (PI * pow(h, 4));
+    if (r < h)
+    {
+        float v = h - r;
+        return v * v * SpikyPow2ScalingFactor;
+    }
+    return 0;
 }
 
-// W_spiky smoothing kernel (2D) - alternative smoothing kernel
-inline float W_Spiky_2D(float r, float h)
+inline float SpikyKernelPow3(float r, float h)
 {
     if (r < 0.0 || r > h) return 0.0;
     // constant chosen so that derivative matches Grad_W_Spiky_2D implementation
@@ -31,34 +36,29 @@ inline float W_Spiky_2D(float r, float h)
     return A * diff * diff * diff; // (h - r)^3
 }
 
-inline float W_Spiky_2D_vec(float2 rVec, float h)
+float DerivativeSpikyPow3(float dst, float radius)
 {
-    return W_Spiky_2D(length(rVec), h);
+	float SpikyPow3DerivativeScalingFactor = 30 / (PI * pow(radius, 5));
+    if (dst <= radius)
+    {
+        float v = radius - dst;
+        return -v * v * SpikyPow3DerivativeScalingFactor;
+    }
+    return 0;
 }
 
-// grad W_spiky (presión) 2D
-inline float2 Grad_W_Spiky_2D(float2 rVec, float h)
+float DerivativeSpikyPow2(float dst, float radius)
 {
-    float r = length(rVec);
-    if (r <= 0.0 || r > h) return float2(0.0, 0.0);
-    float factor = 30.0 / (PI * pow(h, 5.0)); // normalización 2D (ajustable)
-    float coeff = factor * (h - r) * (h - r) / r; // (h-r)^2 / r
-    return -coeff * rVec;
+	float SpikyPow2DerivativeScalingFactor = 12 / (PI * pow(radius, 4));
+    if (dst <= radius)
+    {
+        float v = radius - dst;
+        return -v * SpikyPow2DerivativeScalingFactor;
+    }
+    return 0;
 }
 
-inline float2 Grad_W_Poly6_2D(float2 rVec, float h) {
-    float r = length(rVec);
-    if (r <= 0.0 || r > h) return float2(0.0, 0.0);
-    float h2 = h * h;
-    float r2 = r * r;
-    // normalization constant matching W_Poly6_2D
-    float C = 4.0 / (PI * pow(h, 8.0));
-    float term = h2 - r2;
-    // dW/dr = -6 * C * r * (h^2 - r^2)^2
-    // grad W = dW/dr * (rVec / r) = -6 * C * (h^2 - r^2)^2 * rVec
-    float coeff = -6.0 * C * term * term;
-    return coeff * rVec;
-}
+
 
 // Laplaciano W_viscosity 2D
 inline float Laplacian_W_Viscosity_2D(float r, float h)
@@ -68,21 +68,5 @@ inline float Laplacian_W_Viscosity_2D(float r, float h)
     return factor * (h - r);
 }
 
-// Laplaciano de Poly6 en 2D
-inline float Laplacian_W_Poly6_2D(float r, float h)
-{
-    if (r <= 0.0 || r > h) return 0.0;
-    float h2 = h * h;
-    float r2 = r * r;
-    // normalization constant matching W_Poly6_2D
-    float C = 4.0 / (PI * pow(h, 8.0));
-    // Derived: Laplacian W = 12 * C * (h^2 - r^2) * (3 r^2 - h^2)
-    return 12.0 * C * (h2 - r2) * (3.0 * r2 - h2);
-}
-
-inline float Laplacian_W_Poly6_2D_vec(float2 rVec, float h)
-{
-    return Laplacian_W_Poly6_2D(length(rVec), h);
-}
 
 #endif
